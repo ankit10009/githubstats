@@ -1,166 +1,202 @@
 package com.example.githubstats.service;
 
-import com.example.githubstats.config.GitHubConfig;
-import com.example.githubstats.entity.CommitStats;
-import com.example.githubstats.repository.CommitStatsRepository;
-import jakarta.transaction.Transactional;
-import org.kohsuke.github.*;
+import com.example.githubstats.repository.RepositoryStatsRepository;
+import org.kohsuke.github.*; // Import necessary GitHub classes
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
-import java.net.HttpURLConnection;
-import java.time.LocalDateTime;
-import java.time.ZoneId;
-import java.util.Date;
-import java.util.Optional;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 @Service
-public class GitHubService{
-    private static final Logger log = LoggerFactory.getLogger(GitHubService.class);
+public class GitHubStatsService {
+
+    private static final Logger log = LoggerFactory.getLogger(GitHubStatsService.class);
+    private static final String ORG_NAME = "YOUR_ORG_NAME"; // Replace with your actual Org Name
 
     private final GitHub gitHub;
-    private final CommitStatsRepository commitStatsRepository;
+    // Add to GheStatsService class members:
+    private final RepositoryStatsRepository repoStatsRepository;
 
-
-    public GitHubService(GitHubConfig gitHubConfig, GitHub gitHub, CommitStatsRepository commitStatsRepository) {
+    // Modify constructor:
+    @Autowired
+    public GitHubStatsService(GitHub gitHub, RepositoryStatsRepository repoStatsRepository) {
         this.gitHub = gitHub;
-        this.commitStatsRepository = commitStatsRepository;
+        this.repoStatsRepository = repoStatsRepository;
     }
 
-    @Transactional
-    public void fetchAndSaveStatsForUser(String username) throws IOException {
-        log.info("Starting GitHub stats fetch for user: {}", username);
+    public void findAndProcessRepos(List<String> keywords) {
+        log.info("Searching for repositories in org '{}' matching keywords: {}", ORG_NAME, keywords);
+        Set<GHRepository> matchingRepos = findMatchingRepositoriesUsingSearch(keywords);
+        // OR: Set<GHRepository> matchingRepos = findMatchingRepositoriesByListingAll(keywords);
 
+        log.info("Found {} matching repositories. Processing stats...", matchingRepos.size());
+        for (GHRepository repo : matchingRepos) {
+            processRepositoryStats(repo);
+        }
+        log.info("Finished processing repositories.");
+    }
+
+    // --- Option A: Using Search API ---
+    private Set<GHRepository> findMatchingRepositoriesUsingSearch(List<String> keywords) {
+        Set<GHRepository> uniqueRepos = new HashSet<>();
+        for (String keyword : keywords) {
+            String query = String.format("org:%s %s in:name", ORG_NAME, keyword);
+            log.debug("Executing search query: {}", query);
+            try {
+                PagedSearchIterable<GHRepository> results = gitHub.searchRepositories().q(query).list();
+                results.withPageSize(100).forEach(repo -> {
+                    log.trace("Search found: {}", repo.getFullName());
+                    uniqueRepos.add(repo);
+                });
+            } catch (IOException e) {
+                log.error("Error searching repositories with keyword '{}': {}", keyword, e.getMessage(), e);
+                // Decide: continue with next keyword or stop?
+            }
+        }
+        return uniqueRepos;
+    }
+
+    // --- Option B: Fallback - List All & Filter ---
+    private Set<GHRepository> findMatchingRepositoriesByListingAll(List<String> keywords) {
+        log.warn("Using inefficient method: Listing all repositories for org '{}' and filtering.", ORG_NAME);
+        Set<GHRepository> uniqueRepos = new HashSet<>();
         try {
-            GHUser user = gitHub.getUser(username);
-            if(user == null){
-                log.error("User not found: {}", username);
+            GHOrganization org = gitHub.getOrganization(ORG_NAME);
+            PagedIterable<GHRepository> allRepos = org.listRepositories().withPageSize(100);
+            for (GHRepository repo : allRepos) {
+                String repoNameLower = repo.getName().toLowerCase();
+                for (String keyword : keywords) {
+                    if (repoNameLower.contains(keyword.toLowerCase())) {
+                        log.trace("Filter matched: {}", repo.getFullName());
+                        uniqueRepos.add(repo);
+                        break; // Match found for this repo, no need to check other keywords
+                    }
+                }
+            }
+        } catch (IOException e) {
+            log.error("Error listing repositories for org '{}': {}", ORG_NAME, e.getMessage(), e);
+        }
+        return uniqueRepos;
+    }
+
+    private void processRepositoryStats(GHRepository repo) {
+        log.info("Processing stats for repository: {}", repo.getFullName());
+        try {
+            // --- Step 2: Data Extraction (To be implemented below) ---
+            GHCommitActivityStats commitActivity = fetchCommitActivityWithRetry(repo);
+            List<GHContributorStats> contributorStats = fetchContributorStatsWithRetry(repo);
+
+            if (commitActivity == null || contributorStats == null) {
+                log.warn("Could not retrieve complete stats for repo: {}", repo.getFullName());
+                // Decide how to handle incomplete data (skip repo, save partial, etc.)
                 return;
             }
-            log.info("Found user {}",user.getLogin());
 
-            // Get repositories using PagedIterable to handle potentially many repos
-            PagedIterable<GHRepository> repositories = user.listRepositories().withPageSize(100);
+            // Extract meaningful data
+            int totalCommits = contributorStats.stream().mapToInt(GHContributorStats::getTotal).sum();
+            int contributorCount = contributorStats.size();
+            // Weekly activity is available in commitActivity.getWeeks()
 
-            for(GHRepository repo : repositories){
-                log.info("Processing repository: {}", repo.getFullName());
-                processRepositoryCommits(repo);
+            log.debug("Repo: {}, Total Commits: {}, Contributors: {}", repo.getFullName(), totalCommits, contributorCount);
+
+            // --- Step 4: Database Output (To be implemented below) ---
+            saveStatsToDatabase(repo, totalCommits, contributorCount, commitActivity, contributorStats);
+
+        } catch (IOException e) {
+            log.error("Failed to process stats for repo {}: {}", repo.getFullName(), e.getMessage(), e);
+            // Handle specific exceptions like RateLimit, FileNotFound (repo deleted?)
+            if (e instanceof GHRateLimitExceededException rateLimitEx) {
+                long resetInSeconds = (rateLimitEx.getRateLimitReset()*1000L - System.currentTimeMillis()) / 1000;
+                log.error("RATE LIMIT EXCEEDED processing {}. Resets in approx {} seconds. Consider adding delays.", repo.getFullName(), resetInSeconds);
+                // You might want to pause execution here or stop processing.
+            } else if (e instanceof GHFileNotFoundException) {
+                log.warn("Repository {} seems to have been deleted or is inaccessible.", repo.getFullName());
             }
-            log.info("Finished fetching stats for user {}", username);
-        } catch (GHFileNotFoundException e) {
-            log.error("GitHub user or resource not found: {}", username, e);
-        }
-//        catch (GHRateLimitExceededException e){
-//            log.error("GitHub API Rate Limit Exceeded during commit fetch. Limit : {}. Remaining: {}, Resets at {}",
-//                    e.getRateLimitLimit(), e.getRateLimitRemaining(), new Date(e.getRateLimitReset()*1000L), e);
-//          // Implement backoff strategy here (e.g., wait until reset time)
-//        }
-        catch (IOException e) {
-            log.error("IOException during GitHub API interaction for user {}: {}", username, e.getMessage(), e);
-        } catch (Exception e) {
-            log.error("An unexpected error occurred while fetching stats for user {}: {}", username, e.getMessage(), e);
+        } catch (InterruptedException e) {
+            log.warn("Thread interrupted during stats processing for {}", repo.getFullName());
+            Thread.currentThread().interrupt();
         }
     }
-
-    private void processRepositoryCommits(GHRepository repo) throws IOException {
-        // Get commits using PagedIterable to handle potentially many commits
-        PagedIterable<GHCommit> commits = null;
+    // Add this method:
+    private void saveStatsToDatabase(GHRepository repo, int totalCommits, int contributorCount,
+                                     GHCommitActivityStats commitActivity, List<GHContributorStats> contributorStats) {
+        String repoFullName = repo.getFullName();
         try {
-            commits = repo.listCommits().withPageSize(100);
-            if(!commits.iterator().hasNext()){
-                log.info("Repository {} appears empty (iterator has no commits). Skipping.", repo.getFullName());
-                return; // Nothing to process
-            }
-        } catch (IOException e) { // Catch the declared exception type
-            log.warn("IOException encountered while trying to list commits or check iterator for repo {}: {}", repo.getFullName(), e.getMessage());
+            // Find existing or create new
+            RepositoryStats stats = repoStatsRepository.findByRepositoryFullName(repoFullName)
+                    .orElse(new RepositoryStats());
 
-            // *** Check if the IOException is actually an HttpException ***
-            if (e instanceof HttpException httpEx) { // Java 16+ pattern matching
+            // Update fields
+            stats.setRepositoryFullName(repoFullName);
+            stats.setTotalCommits(totalCommits);
+            stats.setContributorCount(contributorCount);
+            stats.setLastUpdatedAt(LocalDateTime.now());
 
-                // It IS an HttpException, now check the status code
-                if (httpEx.getResponseCode() == HttpURLConnection.HTTP_CONFLICT) { // 409 status code
-                    log.warn("Repository {} is confirmed empty via API response (HTTP 409). Skipping commit processing for this repo.", repo.getFullName());
-                    return; // Exit this method gracefully, proceed to the next repository
-                } else {
-                    // It's a different *kind* of HttpException (e.g., 403 Forbidden, 404 Not Found, 500 Server Error)
-                    log.error("Unexpected HttpException ({}) listing commits for repository {}: {}", httpEx.getResponseCode(), repo.getFullName(), httpEx.getMessage());
-                    // Re-throw the original HttpException to be handled by the calling method's catch blocks
-                    throw httpEx;
-                }
-            } else {
-                // It's a different *kind* of IOException (e.g., network error, connection reset)
-                log.error("Non-HTTP IOException trying to list commits for repository {}: {}", repo.getFullName(), e.getMessage());
-                // Re-throw the original IOException
-                throw e;
-            }
+            // Optionally serialize weekly activity if needed
+            // ObjectMapper objectMapper = new ObjectMapper();
+            // stats.setWeeklyCommitActivityJson(objectMapper.writeValueAsString(commitActivity.getWeeks()));
+
+            repoStatsRepository.save(stats);
+            log.debug("Successfully saved/updated stats for {}", repoFullName);
+
+        } catch (Exception e) { // Catch broader exceptions during DB interaction
+            log.error("Failed to save stats for {} to database: {}", repoFullName, e.getMessage(), e);
+            // Consider handling DataIntegrityViolationException etc.
         }
 
-        log.debug("Fetching commit details for repository: {}", repo.getFullName());
+    // Add these methods to GheStatsService.java
 
-        for(GHCommit listCommit : commits){
-            String sha = listCommit.getSHA1();
-            String repoName = repo.getFullName();
+    private static final int MAX_STATS_RETRIES = 5;
+    private static final long STATS_RETRY_DELAY_MS = 3000; // 3 seconds
 
-            if(commitStatsRepository.findByRepoNameAndSha(repoName,sha).isPresent()){
-                log.debug("Commit {} in repo {} already exists  in DB. Skipping.",sha.substring(0,7),repo);
-                continue;
-            }
-
+    private GHCommitActivityStats fetchCommitActivityWithRetry(GHRepository repo) throws IOException, InterruptedException {
+        for (int i = 0; i < MAX_STATS_RETRIES; i++) {
             try {
-                // --- Fetch Detailed Commit Info ---
-                // Need to fetch the individual commit to get file stats reliably
-                GHCommit detailedCommit = repo.getCommit(sha);
-                GHCommit.ShortInfo commitInfo = detailedCommit.getCommitShortInfo();
-                GHUser author = detailedCommit.getAuthor(); // May be null if author isn't a GH user
-                String authorName = commitInfo.getAuthor().getName();
-                String authorEmail = commitInfo.getAuthor().getEmail();
-                // Use commit date, not authoring date, if they differ. Convert Date to LocalDateTime.
-                LocalDateTime commitDate = commitInfo.getCommitDate().toInstant()
-                        .atZone(ZoneId.systemDefault())
-                        .toLocalDateTime();
-                int filesChanged = detailedCommit.getFiles() != null ? detailedCommit.getFiles().size() : 0;
-                int linesAdded = detailedCommit.getLinesAdded();
-                int linesRemoved = detailedCommit.getLinesDeleted();
-
-                CommitStats commitStatsEntity = new CommitStats(
-                        repoName,
-                        sha,
-                        authorName,
-                        authorEmail,
-                        commitDate,
-                        filesChanged,
-                        linesAdded,
-                        linesRemoved
-                );
-
-                commitStatsRepository.save(commitStatsEntity);
-                log.info("Saved stats for commit {} in repo {}", sha.substring(0, 7), repoName);
-
-                // --- Rate Limit Consideration ---
-                // Add a small delay to avoid hitting rate limits aggressively
-                // Thread.sleep(50); // Sleep for 50ms (consider making this configurable)
-
-            } catch (GHFileNotFoundException e) {
-                log.warn("Commit {} in repo {} not found or repo structure changed. Skipping.", sha.substring(0, 7), repoName);
+                log.trace("Attempt {} to fetch commit activity for {}", i + 1, repo.getFullName());
+                return repo.getCommitActivity(); // This might throw HttpException on 202/404
+            } catch (HttpException e) {
+                if (e.getResponseCode() == 202) { // 202 Accepted
+                    log.info("Commit activity for {} not ready (202 Accepted). Retrying in {}ms...", repo.getFullName(), STATS_RETRY_DELAY_MS);
+                    Thread.sleep(STATS_RETRY_DELAY_MS);
+                } else if (e.getResponseCode() == 404) {
+                    log.warn("Commit activity for {} returned 404 (Not Found - possibly empty repo or stats disabled).", repo.getFullName());
+                    return null; // Treat as no activity available
+                } else {
+                    throw e; // Re-throw other HTTP errors
+                }
             }
-//            catch (GHRateLimitExceededException e) {
-//                log.error("GitHub API rate limit exceeded during commit fetch. Limit: {}, Remaining: {}, Resets at: {}",
-//                        e.getRateLimitLimit(), e.getRateLimitRemaining(), new Date(e.getRateLimitReset()*1000L), e);
-//                throw e; // Re-throw to stop processing in the outer loop or handle differently
-//            }
-            catch (IOException e) {
-                log.error("IOException fetching commit details for {} in repo {}: {}", sha.substring(0, 7), repoName, e.getMessage());
-                // Decide whether to continue with the next commit or stop
-            }
-//            catch (InterruptedException e) {
-//                log.warn("Thread sleep interrupted.");
-//                Thread.currentThread().interrupt(); // Restore interrupted status
-//            }
-
         }
-        log.debug("Finished processing commits for repository: {}", repo.getFullName());
+        log.error("Failed to get commit activity for {} after {} retries.", repo.getFullName(), MAX_STATS_RETRIES);
+        return null; // Indicate failure after retries
+    }
 
+    private List<GHContributorStats> fetchContributorStatsWithRetry(GHRepository repo) throws IOException, InterruptedException {
+        for (int i = 0; i < MAX_STATS_RETRIES; i++) {
+            try {
+                log.trace("Attempt {} to fetch contributor stats for {}", i + 1, repo.getFullName());
+                // The getContributorStats might return null or empty list directly,
+                // or throw HttpException on 202/404 depending on library version/implementation.
+                // Let's assume it follows similar pattern to commit activity for robustness.
+                return repo.getContributorStats();
+            } catch (HttpException e) {
+                if (e.getResponseCode() == 202) { // 202 Accepted
+                    log.info("Contributor stats for {} not ready (202 Accepted). Retrying in {}ms...", repo.getFullName(), STATS_RETRY_DELAY_MS);
+                    Thread.sleep(STATS_RETRY_DELAY_MS);
+                } else if (e.getResponseCode() == 404) {
+                    log.warn("Contributor stats for {} returned 404 (Not Found - possibly empty repo or stats disabled).", repo.getFullName());
+                    return null; // Treat as no contributors/stats available
+                } else {
+                    throw e; // Re-throw other HTTP errors
+                }
+            }
+        }
+        log.error("Failed to get contributor stats for {} after {} retries.", repo.getFullName(), MAX_STATS_RETRIES);
+        return null; // Indicate failure after retries
     }
 }
