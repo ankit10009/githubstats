@@ -44,19 +44,39 @@ public class GitHubService{
         String orgContext = "Organization: " + organizationName;
 
         try {
-            GHOrganization organization = gitHub.getOrganization(organizationName);
-            log.info("Found organization {}", organization.getLogin());
+            // --- OPTIMIZATION: Use Search API instead of listing all repos ---
+            log.debug("Searching for repositories matching filter '{}' in organization '{}'", filterCriteria, organizationName);
 
-            // Get repositories using PagedIterable to handle potentially many repos
-            PagedIterable<GHRepository> repositories = organization.listRepositories();
-            repositories = repositories.withPageSize(100);
+            // 1. Construct the search query string
+            //    Searches within the specified org for repos with filterCriteria in their name
+            String searchQuery = String.format("org:%s %s in:name", organizationName, filterCriteria);
+
+            // 2. Build the search request
+            GHRepositorySearchBuilder searchBuilder = gitHub.searchRepositories().q(searchQuery);
+
+            // 3. Execute the search and get iterable results
+            //    Note: Search API has its own rate limits, potentially different from core API.
+            //    We can also use .pageSize() here if needed/available on GHPagedSearchIterable
+            PagedSearchIterable<GHRepository> repositories = searchBuilder.list();
+            repositories = repositories.withPageSize(100); // Apply page size
+
+            log.info("Found repositories via search. Processing matching repositories...");
+            // --------------------------------------------------------------------
+
+            // Now iterate through the SEARCH RESULTS (much smaller list typically)
+            boolean foundAny = false;
 
             for (GHRepository repo : repositories) {
-                // Apply repository name filter based on the passed criteria
-                if (!repo.getName().contains(filterCriteria)) {
-                    log.trace("Skipping repository {} as it does not match CSI ID '{}'", repo.getFullName(), filterCriteria);
+                foundAny = true; // Mark that we found at least one repo via search
+                // We no longer need the inner check: if (!repo.getName().contains(filterCriteria))
+                // because the search API should only return matching repositories.
+                // A sanity check might still be useful if filters are complex, but often omitted.
+                 /*
+                 if (!repo.getName().contains(filterCriteria)) {
+                    log.warn("Search returned repository '{}' which does not seem to contain filter '{}'. Skipping.", repo.getFullName(), filterCriteria);
                     continue;
-                }
+                 }
+                 */
 
                 log.info("Processing repository: {} for CSI ID '{}'", repo.getFullName(), filterCriteria);
 
@@ -83,21 +103,11 @@ public class GitHubService{
                 }
             }
             log.info("Finished fetching stats for organization {} with filter '{}'", organizationName, filterCriteria);
-        } catch (GHFileNotFoundException e) {
-            String errorContext = orgContext + ", Action: Get Organization";
-            errorLoggingService.logError(filterCriteria, errorContext, e); // Log error
-            log.error("GitHub organization not found: {}", organizationName);
-            throw e; // Re-throw to indicate the run failed setup for this filter
         } catch (HttpException httpEx) {
             String errorContext = orgContext + ", Action: Get Organization/Initial Setup";
             errorLoggingService.logError(filterCriteria, errorContext, httpEx); // Log error
             handleHttpException(httpEx, "organization " + organizationName);
             throw httpEx; // Re-throw
-        } catch (IOException e) {
-            String errorContext = orgContext + ", Action: API Interaction";
-            errorLoggingService.logError(filterCriteria, errorContext, e); // Log error
-            log.error("IOException during GitHub API interaction for organization {}: {}", organizationName, e.getMessage());
-            throw e;
         } catch (Exception e) {
             String errorContext = orgContext + ", Action: Unknown";
             errorLoggingService.logError(filterCriteria, errorContext, e); // Log error
@@ -249,18 +259,6 @@ public class GitHubService{
                 else throw new IOException("Unhandled HTTP error during commit listing", httpEx);
             }
         }
-//        else if (re instanceof HttpException httpExDirect) { // Direct HttpException less likely here
-//            handleHttpException(httpExDirect, "listing commits for " + repoFullName);
-//            if (httpExDirect.getResponseCode() == 429 || httpExDirect.getResponseCode() == 409) { // Handle 409 too
-//                if (httpExDirect.getResponseCode() == 409) {
-//                    log.warn("Repository {} might be empty (Direct HTTP 409). Skipping commit processing.", repoFullName);
-//                    return;
-//                }
-//                throw httpExDirect; // Re-throw 429
-//            }
-//            log.error("Unhandled direct HttpException ({}) listing commits. Re-throwing.", httpExDirect.getResponseCode());
-//            throw httpExDirect;
-//        }
         else {
             log.error("Other RuntimeException listing commits for repo {}. Re-throwing.", repoFullName, re);
             throw re;
