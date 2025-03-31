@@ -88,7 +88,7 @@ public class GitHubService{
         }
     }
 
-    private void processRepositoryCommits(GHRepository repo) throws GHIOException {
+    private void processRepositoryCommits(GHRepository repo) throws IOException {
         // Get commits using PagedIterable to handle potentially many commits
         PagedIterable<GHCommit> commits = null;
         try {
@@ -97,7 +97,33 @@ public class GitHubService{
                 log.info("Repository {} appears empty (iterator has no commits). Skipping.", repo.getFullName());
                 return; // Nothing to process
             }
-        } catch (RuntimeException re) {
+        }
+//        catch (IOException e) { // Catch direct IOExceptions first (like network errors, or direct HttpExceptions)
+//            log.warn("IOException encountered while trying to list commits or check iterator for repo {}: {}", repo.getFullName(), e.getMessage());
+//
+//            if (e instanceof HttpException httpEx) {
+//                // For empty repositories, GitHub API *sometimes* returns 409 directly as HttpException
+//                if (httpEx.getResponseCode() == HttpURLConnection.HTTP_CONFLICT) { // 409 status code
+//                    log.warn("Repository {} is empty (HTTP 409 direct IOException). Skipping commit processing for this repo.", repo.getFullName());
+//                    return; // Exit this method gracefully
+//                }
+//                // Check for rate limiting (HTTP 429)
+//                else if (httpEx.getResponseCode() == 429) {
+//                    log.error("GitHub API rate limit exceeded (HTTP 429 direct IOException) for repository {}. Re-throwing.", repo.getFullName());
+//                    throw e; // Re-throw the original IOException
+//                } else {
+//                    // It's a different kind of direct HttpException
+//                    log.error("Unexpected direct HttpException ({}) listing commits for repository {}: {}",
+//                            httpEx.getResponseCode(), repo.getFullName(), httpEx.getMessage());
+//                    throw e; // Re-throw the original IOException
+//                }
+//            } else {
+//                // It's a different kind of direct IOException (network error, etc.)
+//                log.error("Non-HTTP direct IOException trying to list commits for repository {}: {}", repo.getFullName(), e.getMessage());
+//                throw e; // Re-throw
+//            }
+//        }
+        catch (RuntimeException re) {
             log.warn("RuntimeException encountered while listing commits or checking iterator for repo {}: {}", repo.getFullName(), re.getMessage());
 
             // Specifically check if it's the GHException wrapping the 409 error for empty repos
