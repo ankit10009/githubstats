@@ -14,7 +14,6 @@ import java.net.HttpURLConnection;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.Date;
-import java.util.Optional;
 
 @Service
 public class GitHubService{
@@ -39,32 +38,57 @@ public class GitHubService{
                 log.error("User not found: {}", username);
                 return;
             }
-            log.info("Found user {}",user.getLogin());
+            log.info("Found user {}", user.getLogin());
 
             // Get repositories using PagedIterable to handle potentially many repos
             PagedIterable<GHRepository> repositories = user.listRepositories().withPageSize(100);
 
             for(GHRepository repo : repositories){
                 log.info("Processing repository: {}", repo.getFullName());
-                processRepositoryCommits(repo);
+                try {
+                    processRepositoryCommits(repo);
+                } catch (HttpException httpEx) {
+                    if (httpEx.getResponseCode() == 429) {
+                        // Handle rate limit exception
+                        // Get rate limit info from GitHub if available
+                        GHRateLimit rateLimit = gitHub.getRateLimit();
+                        log.error("GitHub API Rate Limit Exceeded. Limit: {}, Remaining: {}, Resets at: {}",
+                                rateLimit.getLimit(), rateLimit.getRemaining(),
+                                new Date(rateLimit.getResetDate().getTime()));
+
+                        // You could implement a backoff strategy here
+                        // For example: wait until reset time or pause processing
+                        log.info("Stopping processing due to rate limit. Consider implementing a waiting strategy.");
+                        break; // Exit the repository loop
+                    } else {
+                        log.error("HTTP error ({}) processing repository {}: {}",
+                                httpEx.getResponseCode(), repo.getFullName(), httpEx.getMessage());
+                        // Decide whether to continue with next repo or not
+                    }
+                }
             }
             log.info("Finished fetching stats for user {}", username);
         } catch (GHFileNotFoundException e) {
             log.error("GitHub user or resource not found: {}", username, e);
-        }
-//        catch (GHRateLimitExceededException e){
-//            log.error("GitHub API Rate Limit Exceeded during commit fetch. Limit : {}. Remaining: {}, Resets at {}",
-//                    e.getRateLimitLimit(), e.getRateLimitRemaining(), new Date(e.getRateLimitReset()*1000L), e);
-//          // Implement backoff strategy here (e.g., wait until reset time)
-//        }
-        catch (IOException e) {
+        } catch (HttpException httpEx) {
+            if (httpEx.getResponseCode() == 429) {
+                // Handle rate limit exception at the user level
+                GHRateLimit rateLimit = gitHub.getRateLimit();
+                log.error("GitHub API Rate Limit Exceeded during user fetch. Limit: {}, Remaining: {}, Resets at: {}",
+                        rateLimit.getLimit(), rateLimit.getRemaining(),
+                        new Date(rateLimit.getResetDate().getTime()));
+            } else {
+                log.error("HTTP error ({}) during GitHub API interaction for user {}: {}",
+                        httpEx.getResponseCode(), username, httpEx.getMessage());
+            }
+        } catch (GHIOException e) {
             log.error("IOException during GitHub API interaction for user {}: {}", username, e.getMessage(), e);
         } catch (Exception e) {
             log.error("An unexpected error occurred while fetching stats for user {}: {}", username, e.getMessage(), e);
         }
     }
 
-    private void processRepositoryCommits(GHRepository repo) throws IOException {
+    private void processRepositoryCommits(GHRepository repo) throws GHIOException {
         // Get commits using PagedIterable to handle potentially many commits
         PagedIterable<GHCommit> commits = null;
         try {
@@ -73,28 +97,31 @@ public class GitHubService{
                 log.info("Repository {} appears empty (iterator has no commits). Skipping.", repo.getFullName());
                 return; // Nothing to process
             }
-        } catch (IOException e) { // Catch the declared exception type
-            log.warn("IOException encountered while trying to list commits or check iterator for repo {}: {}", repo.getFullName(), e.getMessage());
+        } catch (RuntimeException re) {
+            log.warn("RuntimeException encountered while listing commits or checking iterator for repo {}: {}", repo.getFullName(), re.getMessage());
 
-            // *** Check if the IOException is actually an HttpException ***
-            if (e instanceof HttpException httpEx) { // Java 16+ pattern matching
-
-                // It IS an HttpException, now check the status code
-                if (httpEx.getResponseCode() == HttpURLConnection.HTTP_CONFLICT) { // 409 status code
-                    log.warn("Repository {} is confirmed empty via API response (HTTP 409). Skipping commit processing for this repo.", repo.getFullName());
-                    return; // Exit this method gracefully, proceed to the next repository
-                } else {
-                    // It's a different *kind* of HttpException (e.g., 403 Forbidden, 404 Not Found, 500 Server Error)
-                    log.error("Unexpected HttpException ({}) listing commits for repository {}: {}", httpEx.getResponseCode(), repo.getFullName(), httpEx.getMessage());
-                    // Re-throw the original HttpException to be handled by the calling method's catch blocks
-                    throw httpEx;
+            // Specifically check if it's the GHException wrapping the 409 error for empty repos
+            if (re instanceof GHException ghe && ghe.getCause() instanceof HttpException httpEx) {
+                if (httpEx.getResponseCode() == HttpURLConnection.HTTP_CONFLICT) {
+                    log.warn("Repository {} is empty (HTTP 409 wrapped in GHException). Skipping commit processing.", repo.getFullName());
+                    return; // Handled: Empty repo, exit method gracefully
+                } else if (httpEx.getResponseCode() == 429) {
+                    log.error("Rate limit exceeded (HTTP 429 wrapped in GHException) for repo {}. Re-throwing.", repo.getFullName());
+                    // You might want specific rate limit handling here, but re-throwing is one option
+                    throw re;
                 }
+                // Handle other wrapped HttpExceptions if necessary
+                log.error("Unhandled HttpException ({}) wrapped in GHException for repo {}.", httpEx.getResponseCode(), repo.getFullName(), ghe);
+
             } else {
-                // It's a different *kind* of IOException (e.g., network error, connection reset)
-                log.error("Non-HTTP IOException trying to list commits for repository {}: {}", repo.getFullName(), e.getMessage());
-                // Re-throw the original IOException
-                throw e;
+                // Log other runtime exceptions (could be other GHExceptions, NPEs, etc.)
+                log.error("Other RuntimeException encountered for repo {}. See cause.", repo.getFullName(), re);
             }
+            // Decide how to handle general/other runtime exceptions.
+            // Re-throwing will stop processing for the user if not caught higher up.
+            // Returning will skip the repo and continue with the next.
+            // For safety, re-throwing might be better unless you know it's safe to continue.
+            throw re; // Re-throw if not specifically handled (like the 409 case)
         }
 
         log.debug("Fetching commit details for repository: {}", repo.getFullName());
@@ -104,7 +131,7 @@ public class GitHubService{
             String repoName = repo.getFullName();
 
             if(commitStatsRepository.findByRepoNameAndSha(repoName,sha).isPresent()){
-                log.debug("Commit {} in repo {} already exists  in DB. Skipping.",sha.substring(0,7),repo);
+                log.debug("Commit {} in repo {} already exists in DB. Skipping.",sha.substring(0,7),repo.getFullName());
                 continue;
             }
 
@@ -138,29 +165,12 @@ public class GitHubService{
                 commitStatsRepository.save(commitStatsEntity);
                 log.info("Saved stats for commit {} in repo {}", sha.substring(0, 7), repoName);
 
-                // --- Rate Limit Consideration ---
-                // Add a small delay to avoid hitting rate limits aggressively
-                // Thread.sleep(50); // Sleep for 50ms (consider making this configurable)
-
             } catch (GHFileNotFoundException e) {
                 log.warn("Commit {} in repo {} not found or repo structure changed. Skipping.", sha.substring(0, 7), repoName);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
             }
-//            catch (GHRateLimitExceededException e) {
-//                log.error("GitHub API rate limit exceeded during commit fetch. Limit: {}, Remaining: {}, Resets at: {}",
-//                        e.getRateLimitLimit(), e.getRateLimitRemaining(), new Date(e.getRateLimitReset()*1000L), e);
-//                throw e; // Re-throw to stop processing in the outer loop or handle differently
-//            }
-            catch (IOException e) {
-                log.error("IOException fetching commit details for {} in repo {}: {}", sha.substring(0, 7), repoName, e.getMessage());
-                // Decide whether to continue with the next commit or stop
-            }
-//            catch (InterruptedException e) {
-//                log.warn("Thread sleep interrupted.");
-//                Thread.currentThread().interrupt(); // Restore interrupted status
-//            }
-
         }
         log.debug("Finished processing commits for repository: {}", repo.getFullName());
-
     }
 }
