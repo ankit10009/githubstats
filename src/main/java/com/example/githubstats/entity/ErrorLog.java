@@ -1,12 +1,12 @@
 package com.example.githubstats.entity;
 
 import jakarta.persistence.*;
-
 import java.time.LocalDateTime;
 
 @Entity
-@Table(name = "github_error_log")
+@Table(name = "error_log")
 public class ErrorLog {
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
@@ -17,23 +17,29 @@ public class ErrorLog {
     @Column(length = 50)
     private String errorType; // e.g., "HTTP", "IO", "RUNTIME", "CONFIG"
 
-    @Column(columnDefinition = "TEXT") // Use TEXT for potentially long messages
+    @Column(columnDefinition = "TEXT")
     private String errorMessage;
 
-    private Integer httpStatusCode; // Nullable
+    private Integer httpStatusCode;
 
-    @Column(length = 500) // Context like Org, Repo, Commit SHA, Filter
+    @Column(length = 500)
     private String context;
 
-    @Column(length = 255) // Link back to the filter being processed
-    private String filterCriteria;
+    @Column(length = 255)
+    private String filterCriteria; // Can be null if error is not filter-specific
+
+    @Column(length = 20)
+    private String source; // Added source "GitHub", "BitbucketCloud" etc.
 
     public ErrorLog() {
-        this.timestamp = LocalDateTime.now(); // Default to now
+        this.timestamp = LocalDateTime.now();
     }
 
-    public ErrorLog(String errorType, String errorMessage, Integer httpStatusCode, String context, String filterCriteria) {
+    // Updated constructor
+    public ErrorLog(String source, String errorType, String errorMessage, Integer httpStatusCode, String context,
+            String filterCriteria) {
         this();
+        this.source = source;
         this.errorType = errorType;
         this.errorMessage = errorMessage;
         this.httpStatusCode = httpStatusCode;
@@ -41,6 +47,7 @@ public class ErrorLog {
         this.filterCriteria = filterCriteria;
     }
 
+    // --- Getters and Setters (include source) ---
     public Long getId() {
         return id;
     }
@@ -95,5 +102,13 @@ public class ErrorLog {
 
     public void setFilterCriteria(String filterCriteria) {
         this.filterCriteria = filterCriteria;
+    }
+
+    public String getSource() {
+        return source;
+    }
+
+    public void setSource(String source) {
+        this.source = source;
     }
 }

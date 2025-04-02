@@ -6,36 +6,33 @@ import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-@Component // Marks this as a Spring-managed component
+@Component
 public class ScheduledTasks {
 
     private static final Logger log = LoggerFactory.getLogger(ScheduledTasks.class);
 
     private final FetchOrchestrationService fetchOrchestrationService;
 
-    // Inject the service needed to trigger the process
     public ScheduledTasks(FetchOrchestrationService fetchOrchestrationService) {
         this.fetchOrchestrationService = fetchOrchestrationService;
     }
 
     /**
-     * Scheduled task to automatically trigger the GitHub stats fetch process every Saturday.
-     * Runs at 2:00 AM Central Time (adjust cron/zone as needed).
-     * Cron format: second minute hour day-of-month month day-of-week
-     * Zone: Specifies the time zone for the schedule. "America/Chicago" covers Irving, TX.
+     * Scheduled task to trigger processing for ALL configured sources (GitHub,
+     * Bitbucket).
+     * Runs every Saturday at 2:00 AM Central Time.
      */
-    @Scheduled(cron = "0 0 2 * * SAT", zone = "America/Chicago") // Run at 2:00:00 AM on Saturday in Central Time
-    public void triggerWeeklyGithubFetch() {
-        log.info("Scheduled task running: Triggering weekly GitHub stats fetch for all filters.");
+    @Scheduled(cron = "0 0 2 * * SAT", zone = "America/Chicago") // Adjust time/zone as needed
+    public void triggerWeeklyFetchAllSources() {
+        log.info("Scheduled Task: Triggering weekly stats fetch for ALL sources.");
         try {
-            // Call the same asynchronous method used by the controller/runner
-            fetchOrchestrationService.triggerAllFilterProcessing();
-            log.info("Scheduled task: Asynchronous fetch process triggered successfully.");
+            // Call the main orchestrator method that handles both sources
+            fetchOrchestrationService.triggerAllProcessing();
+            log.info("Scheduled Task: Asynchronous fetch process triggered successfully for all sources.");
         } catch (Exception e) {
-            // Log any error during the *triggering* of the task by the scheduler
-            log.error("Scheduled task: Failed to trigger the asynchronous fetch process.", e);
-            // Consider logging this failure to your ErrorLog table as well if critical
-            // errorLoggingService.logError(null, "Scheduled Task Trigger", e); // Requires injecting ErrorLoggingService here too
+            log.error("Scheduled Task: Failed to trigger the asynchronous fetch process for all sources.", e);
+            // Optional: Log this trigger failure to ErrorLog table via ErrorLoggingService
+            // if injected here
         }
     }
 }

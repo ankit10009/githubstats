@@ -1,8 +1,6 @@
 package com.example.githubstats;
 
-// Other imports...
 import com.example.githubstats.service.FetchOrchestrationService;
-import com.example.githubstats.service.GitHubService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.CommandLineRunner;
@@ -13,32 +11,31 @@ import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 @SpringBootApplication
-@EnableAsync // Enable Spring's asynchronous method execution capability
-@EnableScheduling
+@EnableAsync // Enable asynchronous execution
+@EnableScheduling // Enable scheduled tasks
 public class GithubstatsApplication {
 
 	private static final Logger log = LoggerFactory.getLogger(GithubstatsApplication.class);
 
-	// Keep the constructor injection for services needed by CommandLineRunner if still used
-	private final FetchOrchestrationService fetchOrchestrationService; // Inject Orchestrator
+	// Inject orchestrator if needed for CommandLineRunner trigger
+	private final FetchOrchestrationService fetchOrchestrationService;
 
 	public GithubstatsApplication(FetchOrchestrationService fetchOrchestrationService) {
 		this.fetchOrchestrationService = fetchOrchestrationService;
 	}
 
-
 	public static void main(String[] args) {
 		SpringApplication.run(GithubstatsApplication.class, args);
 	}
 
-	// Optional: Keep CommandLineRunner to trigger on startup, or remove if only triggered by API
+	// Optional: Trigger fetch on application startup
 	@Bean
 	CommandLineRunner runner() {
 		return args -> {
-			log.info("Application started. Triggering initial fetch via CommandLineRunner...");
-			// Delegate the work to the orchestration service
-			fetchOrchestrationService.triggerAllFilterProcessing();
-			log.info("CommandLineRunner finished triggering asynchronous fetch.");
+			log.info("CommandLineRunner: Triggering initial fetch on startup...");
+			// Trigger processing for all configured sources
+			fetchOrchestrationService.triggerAllProcessing();
+			log.info("CommandLineRunner: Asynchronous fetch trigger completed.");
 		};
 	}
 }

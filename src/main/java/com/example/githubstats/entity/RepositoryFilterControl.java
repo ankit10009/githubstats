@@ -1,29 +1,44 @@
 package com.example.githubstats.entity;
 
-import jakarta.persistence.Column;
-import jakarta.persistence.Entity;
-import jakarta.persistence.Id;
-import jakarta.persistence.Table;
-
+import jakarta.persistence.*; // Correct import
 import java.time.LocalDateTime;
 
 @Entity
-@Table(name="github_repo_selection")
+@Table(name = "repository_filter_control", indexes = {
+        @Index(name = "idx_source", columnList = "source")
+})
+// Use a composite key or a generated ID if filterCriteria + source isn't unique
+// enough
+@IdClass(RepositoryFilterControlId.class) // Using @IdClass for composite key
 public class RepositoryFilterControl {
 
-    @Id
-    @Column(name="csi_id",length = 255)  // Primary key is the CSI ID
-    private String filterCriteria;
+    @Id // Part of composite key
+    @Column(length = 20)
+    private String source; // "GitHub", "BitbucketCloud"
 
-    @Column(name="last_fetch_timestamp")
-    private LocalDateTime lastFetchTimestamp; // Timestamp specific to this filter
+    @Id // Part of composite key
+    @Column(name = "filter_criteria", length = 255)
+    private String filterCriteria; // Filter text (repo name substring, project key, etc.)
+
+    @Column(name = "last_fetch_timestamp")
+    private LocalDateTime lastFetchTimestamp;
 
     public RepositoryFilterControl() {
     }
 
-    public RepositoryFilterControl(String filterCriteria, LocalDateTime lastFetchTimestamp) {
+    public RepositoryFilterControl(String source, String filterCriteria, LocalDateTime lastFetchTimestamp) {
+        this.source = source;
         this.filterCriteria = filterCriteria;
         this.lastFetchTimestamp = lastFetchTimestamp;
+    }
+
+    // --- Getters and Setters ---
+    public String getSource() {
+        return source;
+    }
+
+    public void setSource(String source) {
+        this.source = source;
     }
 
     public String getFilterCriteria() {

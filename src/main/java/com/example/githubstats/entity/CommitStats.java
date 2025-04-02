@@ -1,36 +1,43 @@
 package com.example.githubstats.entity;
 
 import jakarta.persistence.*;
-
 import java.time.LocalDateTime;
 
 @Entity
-@Table(name = "commit_stats",indexes = {
-        @Index(name = "idx_repo_sha",columnList = "repoName, sha", unique = true)
+@Table(name = "commit_stats", indexes = {
+        // Index updated to include source
+        @Index(name = "idx_source_repo_sha", columnList = "source, repoName, sha", unique = true)
 })
 public class CommitStats {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(nullable = false)
+    @Column(nullable = false, length = 20) // Added source column
+    private String source; // e.g., "GitHub", "BitbucketCloud"
+
+    @Column(nullable = false) // Stores full name (org/repo) or (workspace/repo)
     private String repoName;
 
-    @Column(nullable = false,length = 40)
+    @Column(nullable = false, length = 64) // Increased length for potentially longer Bitbucket SHAs
     private String sha;
 
     private String authorName;
     private String authorEmail;
     private LocalDateTime commitDate;
 
-    private int linesAdded;
-    private int linesRemoved;
-    private int totalChanges;
+    // Allow nulls for Bitbucket as diffstat is complex
+    private Integer linesAdded;
+    private Integer linesRemoved;
+    private Integer filesChanged; // Files changed count
 
     public CommitStats() {
     }
 
-    public CommitStats(String repoName, String sha, String authorName, String authorEmail, LocalDateTime commitDate, int linesAdded, int linesRemoved, int totalChanges) {
+    // Updated constructor
+    public CommitStats(String source, String repoName, String sha, String authorName, String authorEmail,
+            LocalDateTime commitDate, Integer linesAdded, Integer linesRemoved, Integer filesChanged) {
+        this.source = source;
         this.repoName = repoName;
         this.sha = sha;
         this.authorName = authorName;
@@ -38,15 +45,24 @@ public class CommitStats {
         this.commitDate = commitDate;
         this.linesAdded = linesAdded;
         this.linesRemoved = linesRemoved;
-        this.totalChanges = totalChanges;
+        this.filesChanged = filesChanged;
     }
 
+    // --- Getters and Setters for all fields (including source) ---
     public Long getId() {
         return id;
     }
 
     public void setId(Long id) {
         this.id = id;
+    }
+
+    public String getSource() {
+        return source;
+    }
+
+    public void setSource(String source) {
+        this.source = source;
     }
 
     public String getRepoName() {
@@ -89,27 +105,27 @@ public class CommitStats {
         this.commitDate = commitDate;
     }
 
-    public int getLinesAdded() {
+    public Integer getLinesAdded() {
         return linesAdded;
-    }
+    } // Return Integer
 
-    public void setLinesAdded(int linesAdded) {
+    public void setLinesAdded(Integer linesAdded) {
         this.linesAdded = linesAdded;
-    }
+    } // Accept Integer
 
-    public int getLinesRemoved() {
+    public Integer getLinesRemoved() {
         return linesRemoved;
-    }
+    } // Return Integer
 
-    public void setLinesRemoved(int linesRemoved) {
+    public void setLinesRemoved(Integer linesRemoved) {
         this.linesRemoved = linesRemoved;
-    }
+    } // Accept Integer
 
-    public int getTotalChanges() {
-        return totalChanges;
-    }
+    public Integer getFilesChanged() {
+        return filesChanged;
+    } // Return Integer
 
-    public void setTotalChanges(int totalChanges) {
-        this.totalChanges = totalChanges;
-    }
+    public void setFilesChanged(Integer filesChanged) {
+        this.filesChanged = filesChanged;
+    } // Accept Integer
 }
