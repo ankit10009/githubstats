@@ -20,7 +20,7 @@ public class FetchOrchestrationService {
     private static final Logger log = LoggerFactory.getLogger(FetchOrchestrationService.class);
     private static final LocalDateTime DEFAULT_INITIAL_FETCH_DATE = LocalDateTime.of(2024, Month.JANUARY, 1, 0, 0, 0);
     private static final String GITHUB_SOURCE = "GitHub";
-    private static final String BITBUCKET_SOURCE = "BitbucketCloud";
+    private static final String BITBUCKET_SOURCE = "BitbucketDC";
 
     private final GitHubService gitHubService;
     private final BitbucketService bitbucketService; // Inject Bitbucket service
