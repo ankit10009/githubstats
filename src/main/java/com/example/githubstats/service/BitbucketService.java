@@ -8,8 +8,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.ParameterizedTypeReference;
-import org.springframework.http.HttpMethod;
-import org.springframework.http.ResponseEntity;
+import org.springframework.http.*;
 import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,6 +21,7 @@ import java.net.URI;
 import java.time.Instant; // Use Instant for epoch millis
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.Collections;
 import java.util.Optional;
 
 @Service
@@ -182,16 +182,28 @@ public class BitbucketService {
                             continue;
                         }
 
+                        /*// --- Get File Count (Optional but feasible) using /changes endpoint ---
+                        Integer totalFilesChanged = 0;
+                        try {
+                            // Call helper method to count files changed
+                            totalFilesChanged = fetchFileChangedCount(projectKey, repoSlug, sha, commitContext);
+                            log.debug("File count for commit {}: {}", commit.getDisplayId(), totalFilesChanged);
+                        } catch (Exception e) {
+                            log.error("Failed to fetch file count for commit {}: {}. Storing 0.", commit.getDisplayId(), e.getMessage());
+                            // Error logged within fetchFileChangedCount
+                            // Keep file count as 0
+                        }*/
+
                         // --- Fetch Change Stats ---
                         Integer totalLinesAdded = 0;
                         Integer totalLinesRemoved = 0;
                         Integer totalFilesChanged = 0;
                         try {
-                            CommitDiffStats stats = fetchChangesStats(projectKey, repoSlug, sha, commitContext);
+                            CommitDiffStats stats = fetchStructuredDiffStats(projectKey, repo.getSlug(), sha, commitContext);
                             totalLinesAdded = stats.linesAdded();
                             totalLinesRemoved = stats.linesRemoved();
                             totalFilesChanged = stats.filesChanged();
-                            log.debug("Change stats for commit {}: Added={}, Removed={}, Files={}", commit.getDisplayId(), totalLinesAdded, totalLinesRemoved, totalFilesChanged);
+                            log.debug("Parsed structured diff stats for commit {}: Added={}, Removed={}, Files={}", commit.getDisplayId(), totalLinesAdded, totalLinesRemoved, totalFilesChanged);
                         } catch (Exception e) {
                             log.error("Failed to fetch change stats for Bitbucket DC commit {}: {}. Storing 0/null for stats.", commit.getDisplayId(), e.getMessage());
                             // Error logged within fetchChangesStats
@@ -243,8 +255,94 @@ public class BitbucketService {
     // Helper record for stats
     private record CommitDiffStats(int linesAdded, int linesRemoved, int filesChanged) {}
 
+    // --- REWRITTEN Method to fetch structured JSON Diff Stats ---
+    private CommitDiffStats fetchStructuredDiffStats(String projectKey, String repoSlug, String commitSha, String commitContext) {
+        log.debug("Fetching structured diff stats for commit {}", commitSha.substring(0, 7));
+
+        String diffUrlTemplate = "/projects/{projectKey}/repos/{repoSlug}/commits/{commitSha}/diff";
+        UriComponentsBuilder diffUriBuilder = UriComponentsBuilder.fromPath(diffUrlTemplate)
+                .queryParam("contextLines", 0) // Keep context minimal
+                .queryParam("whitespace", "ignore-all"); // Keep user-specified whitespace option
+
+        String diffUrl = diffUriBuilder.buildAndExpand(projectKey, repoSlug, commitSha).toUriString();
+        log.trace("Fetching structured diff from URL: {}", diffUrl);
+
+        try {
+            // --- Prepare HTTP Headers ---
+            HttpHeaders headers = new HttpHeaders();
+            // Request JSON response explicitly
+            headers.setAccept(Collections.singletonList(MediaType.APPLICATION_JSON));
+            // Include Bearer token if not handled globally by RestTemplate config (it should be)
+            // headers.setBearerAuth(personalAccessToken); // Usually not needed if RestTemplate is pre-configured
+
+            HttpEntity<String> entity = new HttpEntity<>(headers);
+
+            // --- Make API Call expecting the DTO ---
+            ResponseEntity<BitbucketDCDiffResponse> response = restTemplate.exchange(
+                    diffUrl,
+                    HttpMethod.GET,
+                    entity, // Pass headers via HttpEntity
+                    BitbucketDCDiffResponse.class // Expect our top-level DTO
+            );
+
+            BitbucketDCDiffResponse diffResponse = response.getBody();
+
+            if (diffResponse == null || diffResponse.getDiffs() == null) {
+                log.warn("Received null or empty diffs structure for commit {}", commitSha.substring(0, 7));
+                return new CommitDiffStats(0, 0, 0);
+            }
+
+            // --- Process the structured JSON ---
+            int totalAdded = 0;
+            int totalRemoved = 0;
+            int fileCount = 0;
+
+            for (BitbucketDCFileDiff fileDiff : diffResponse.getDiffs()) {
+                fileCount++; // Count each file entry in the 'diffs' list
+                if (fileDiff.getHunks() != null) {
+                    for (BitbucketDCHunk hunk : fileDiff.getHunks()) {
+                        if (hunk.getSegments() != null) {
+                            for (BitbucketDCSegment segment : hunk.getSegments()) {
+                                if (segment.getLines() != null && segment.getType() != null) {
+                                    // Count lines based on segment type, as per Python logic
+                                    if ("ADDED".equalsIgnoreCase(segment.getType())) {
+                                        totalAdded += segment.getLines().size();
+                                    } else if ("REMOVED".equalsIgnoreCase(segment.getType())) {
+                                        totalRemoved += segment.getLines().size();
+                                    }
+                                    // Ignore "CONTEXT" segments for line counts
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            log.trace("Parsed structured diff for commit {}: Added={}, Removed={}, Files={}", commitSha.substring(0,7), totalAdded, totalRemoved, fileCount);
+            return new CommitDiffStats(totalAdded, totalRemoved, fileCount);
+            // --- End Processing ---
+
+        } catch (HttpClientErrorException e) {
+            // Log specific HTTP errors
+            log.error("HTTP error fetching structured diff for commit {}: {} {}", commitSha.substring(0, 7), e.getStatusCode(), e.getResponseBodyAsString());
+            errorLoggingService.logError(SOURCE_NAME, projectKey, commitContext + ", Action: Fetch Structured Diff", e);
+            // Return 0s, assuming commit exists but diff failed
+            return new CommitDiffStats(0, 0, 0);
+        } catch (RestClientException e) {
+            // Log network/client errors
+            log.error("Network/Client error fetching structured diff for commit {}: {}", commitSha.substring(0, 7), e.getMessage());
+            errorLoggingService.logError(SOURCE_NAME, projectKey, commitContext + ", Action: Fetch Structured Diff", e);
+            return new CommitDiffStats(0, 0, 0);
+        } catch (Exception e) {
+            // Catch potential JSON parsing errors or NullPointerExceptions during DTO traversal
+            log.error("Error processing structured diff response for commit {}: {}", commitSha.substring(0, 7), e.getMessage(), e);
+            errorLoggingService.logError(SOURCE_NAME, projectKey, commitContext + ", Action: Process Structured Diff", e);
+            return new CommitDiffStats(0, 0, 0);
+        }
+    }
+
     // Fetch stats using the /changes endpoint
-    private CommitDiffStats fetchChangesStats(String projectKey, String repoSlug, String commitSha, String commitContext) {
+    /*private CommitDiffStats fetchChangesStats(String projectKey, String repoSlug, String commitSha, String commitContext) {
         log.debug("Fetching change stats for commit {}", commitSha.substring(0, 7));
         int totalLinesAdded = 0;
         int totalLinesRemoved = 0;
@@ -302,6 +400,67 @@ public class BitbucketService {
         } // End while changes pages
 
         return new CommitDiffStats(totalLinesAdded, totalLinesRemoved, totalFilesChanged);
-    }
+    }*/
+
+    /*
+    // --- NEW Method to get only the count of changed files using /changes endpoint ---
+    private int fetchFileChangedCount(String projectKey, String repoSlug, String commitSha, String commitContext) {
+        log.debug("Fetching file count for commit {}", commitSha.substring(0, 7));
+        int totalFiles = 0;
+
+        // Use the /changes endpoint, but only need pagination info and existence of values
+        String changesUrlTemplate = "/projects/{projectKey}/repos/{repoSlug}/commits/{commitSha}/changes";
+        int changesStart = 0;
+        int changesLimit = 100; // Use a reasonable limit, we only need the count really
+        boolean changesLastPage = false;
+
+        // Check if we can get total count directly? The 'size' field in paged response often holds total count.
+        // Let's try fetching just the first page with limit=1 and check the 'size' field first for efficiency.
+
+        UriComponentsBuilder firstPageUriBuilder = UriComponentsBuilder.fromPath(changesUrlTemplate)
+                .queryParam("start", 0)
+                .queryParam("limit", 1) // Only need one item to potentially get total size
+                .queryParam("fields", "size"); // Ask ONLY for the size field
+
+        String firstPageUrl = firstPageUriBuilder.buildAndExpand(projectKey, repoSlug, commitSha).toUriString();
+        log.trace("Fetching change count (first page) for commit {}: {}", commitSha.substring(0,7), firstPageUrl);
+
+        try {
+            ResponseEntity<BitbucketDCPagedResponse<Object>> response = restTemplate.exchange(
+                    firstPageUrl, HttpMethod.GET, null,
+                    // Use Object as we don't care about 'values', only 'size' from the paged response
+                    new ParameterizedTypeReference<BitbucketDCPagedResponse<Object>>() {}
+            );
+            BitbucketDCPagedResponse<Object> pagedResponse = response.getBody();
+
+            // If 'size' is present and reliable, use it directly!
+            if (pagedResponse != null && pagedResponse.getSize() > 0) {
+                log.debug("Got total file count ({}) from 'size' field for commit {}", pagedResponse.getSize(), commitSha.substring(0,7));
+                return pagedResponse.getSize();
+            } else if (pagedResponse != null && pagedResponse.getValues() != null && !pagedResponse.getValues().isEmpty()) {
+                // If size wasn't useful, but we got a value, means at least 1 file.
+                // Fallback to counting pages if needed, but often 'size' works for DC API totals.
+                log.warn("Could not determine total file count from 'size' field for commit {}, but found values. Count may be inaccurate if > {}", commitSha.substring(0,7), changesLimit);
+                // If size field isn't reliable, you'd implement full pagination here and count items.
+                // For simplicity, we'll return 1 if size is missing but values exist, otherwise rely on size.
+                // A full pagination loop here would be more accurate if the 'size' field is unreliable.
+                if (pagedResponse.getSize() == 0) return 1; // At least one file seen
+                // Fall through to return 0 if size is 0 and no values either
+            }
+
+        } catch (HttpClientErrorException e) {
+            log.error("HTTP error fetching file count for commit {}: {} {}", commitSha.substring(0, 7), e.getStatusCode(), e.getResponseBodyAsString());
+            errorLoggingService.logError(SOURCE_NAME, projectKey, commitContext + ", Action: Fetch File Count", e);
+            // Fall through to return 0
+        } catch (RestClientException e) {
+            log.error("Network/Client error fetching file count for commit {}: {}", commitSha.substring(0, 7), e.getMessage());
+            errorLoggingService.logError(SOURCE_NAME, projectKey, commitContext + ", Action: Fetch File Count", e);
+            // Fall through to return 0
+        }
+
+        // Fallback if size couldn't be determined
+        log.warn("Could not determine file count for commit {}. Returning 0.", commitSha.substring(0,7));
+        return 0; // Return 0 if count couldn't be determined
+    }*/
 
 } // End class BitbucketService
