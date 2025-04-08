@@ -8,6 +8,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.time.Month;
@@ -79,7 +80,27 @@ public class FetchOrchestrationService {
 
         log.info("Found {} filters to process for source '{}'.", filtersToProcess.size(), source);
 
-        for (RepositoryFilterControl filterControl : filtersToProcess) {
+        if (GITHUB_SOURCE.equals(source)) {
+            // Process GitHub filters sequentially (or apply similar async pattern if needed)
+            for (RepositoryFilterControl filterControl : filtersToProcess) {
+                processSingleGitHubFilter(filterControl); // Assuming a sequential helper for now
+            }
+        } else if (BITBUCKET_SOURCE.equals(source)) {
+            // Submit each Bitbucket project filter to the async executor
+            log.info("Submitting {} Bitbucket project tasks for concurrent processing...", filtersToProcess.size());
+            for (RepositoryFilterControl filterControl : filtersToProcess) {
+                // Call the NEW async method for each Bitbucket project
+                processSingleBitbucketProjectAsync(filterControl);
+            }
+            log.info("All Bitbucket project tasks submitted.");
+        } else {
+            log.warn("Unknown source '{}' encountered during dispatch.", source);
+        }
+        // Note: This method now returns quickly for Bitbucket after submitting tasks.
+        log.info("Finished dispatching processing for source '{}'.", source);
+    }
+
+        /*for (RepositoryFilterControl filterControl : filtersToProcess) {
             String currentFilter = filterControl.getFilterCriteria();
             LocalDateTime currentFilterProcessingStartTime = LocalDateTime.now();
             LocalDateTime fetchSinceDateTime = filterControl.getLastFetchTimestamp() != null
@@ -118,5 +139,81 @@ public class FetchOrchestrationService {
         } // End loop
 
         log.info("Finished processing all filters for source '{}'.", source);
+
+    }*/
+
+    // --- Helper for sequential GitHub processing (or make async too if desired) ---
+    private void processSingleGitHubFilter(RepositoryFilterControl filterControl) {
+        String currentFilter = filterControl.getFilterCriteria();
+        LocalDateTime fetchSinceDateTime = determineSinceDateTime(filterControl);
+        LocalDateTime processingStartTime = LocalDateTime.now(); // Track start time
+        log.info("(Sequential) Processing GitHub filter: '{}'. Fetching since: {}", currentFilter, fetchSinceDateTime);
+        try {
+            if (gitHubService != null) {
+                gitHubService.fetchAndSaveStatsForFilter(currentFilter, fetchSinceDateTime);
+                // Update timestamp on success
+                filterControl.setLastFetchTimestamp(processingStartTime);
+                filterControlRepository.save(filterControl);
+                log.info("(Sequential) Successfully processed GitHub filter '{}'. Updated timestamp.", currentFilter);
+            } else {
+                log.warn("GitHub service is unavailable, skipping filter '{}'", currentFilter);
+            }
+        } catch (Exception e) {
+            String errorContext = String.format("Orchestration: Processing GitHub filter '%s'", currentFilter);
+            errorLoggingService.logError(GITHUB_SOURCE, currentFilter, errorContext, e);
+            log.error("(Sequential) Failed to process GitHub filter '{}': {}. Timestamp NOT updated.", currentFilter, e.getMessage(), e);
+        } finally {
+            log.info("-----------------------------------------------------");
+        }
+    }
+
+    // --- NEW Async method for processing a SINGLE Bitbucket project ---
+    @Async("bitbucketTaskExecutor") // Specify the bean name of the dedicated executor
+    @Transactional // Make processing for one project transactional
+    public void processSingleBitbucketProjectAsync(RepositoryFilterControl filterControl) {
+        String projectKey = filterControl.getFilterCriteria(); // filterCriteria is the projectKey
+        LocalDateTime fetchSinceDateTime = determineSinceDateTime(filterControl);
+        LocalDateTime processingStartTime = LocalDateTime.now(); // Track start time for this specific task
+
+        // Log with thread name to see concurrency
+        log.info("[{}] Starting async processing for Bitbucket project: '{}'. Fetching since: {}",
+                Thread.currentThread().getName(), projectKey, fetchSinceDateTime);
+
+        try {
+            // Delegate the actual work for this project to the BitbucketService
+            // The try-catch for service-level errors should be within BitbucketService ideally,
+            // but we also catch here to ensure timestamp isn't updated on failure.
+            if (bitbucketService != null) {
+                bitbucketService.fetchAndSaveStatsForFilter(projectKey, fetchSinceDateTime);
+
+                // If fetchAndSaveStatsForFilter completes without throwing an exception, update timestamp
+                filterControl.setLastFetchTimestamp(processingStartTime);
+                filterControlRepository.save(filterControl);
+                log.info("[{}] Successfully processed Bitbucket project '{}'. Updated timestamp.", Thread.currentThread().getName(), projectKey);
+            } else {
+                log.warn("[{}] Bitbucket service is unavailable, skipping project '{}'", Thread.currentThread().getName(), projectKey);
+                // Optionally log config error via ErrorLoggingService
+            }
+
+        } catch (Exception e) {
+            // Log failure for this specific project. Error should also be logged deeper in BitbucketService.
+            String errorContext = String.format("Async Orchestration: Processing Bitbucket project '%s'", projectKey);
+            // Log again here if deeper logging might miss context or fail
+            // errorLoggingService.logError(BITBUCKET_DC_SOURCE, projectKey, errorContext, e);
+            log.error("[{}] Failed to process Bitbucket project '{}': {}. Timestamp NOT updated.",
+                    Thread.currentThread().getName(), projectKey, e.getMessage(), e);
+            // DO NOT update the timestamp here on failure
+        } finally {
+            log.info("[{}] Finished async task for Bitbucket project '{}'.", Thread.currentThread().getName(), projectKey);
+            // Add separator if helps in logs, but might interleave with other threads
+            // log.info("-----------------------------------------------------");
+        }
+    }
+
+    // Helper to determine start date (used by both GitHub and Bitbucket processing)
+    private LocalDateTime determineSinceDateTime(RepositoryFilterControl filterControl) {
+        return filterControl.getLastFetchTimestamp() != null
+                ? filterControl.getLastFetchTimestamp()
+                : DEFAULT_INITIAL_FETCH_DATE;
     }
 }
